@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      1.7
 // @description  简洁界面：当前 Token 编辑与历史记录分为两个 Tab，支持记录名称、名称筛选、历史名称编辑，所有关键文本为黑色
-// @author       Grok
+// @author       github.com/V1an1337
 // @match        *://*/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -1363,3 +1363,4 @@
         panel.style.display = 'none';
     };
 })();
+
