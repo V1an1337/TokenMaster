@@ -1,8 +1,17 @@
 # TokenMaster (Tampermonkey Token 管理器)
 
 一个油猴脚本，用于在当前网页查看/编辑并保存 Token 相关数据（`localStorage` + `Cookie`），支持历史记录，以及导入/导出备份。
-<img width="650" height="776" alt="image" src="https://github.com/user-attachments/assets/cb97e568-55e6-4ecb-a3ee-252a73e8887a" />
-<img width="650" height="665" alt="image" src="https://github.com/user-attachments/assets/c7ae4d56-70a0-40e8-8b15-f93637fa6a0c" />
+
+## 一键安装（推荐）
+
+- 安装链接：[tokenmaster.user.js](https://github.com/V1an1337/TokenMaster/raw/refs/heads/main/tokenmaster.user.js)
+
+## 截图
+
+<p align="center">
+  <img alt="Token 管理器 - 当前编辑" src="https://github.com/user-attachments/assets/cb97e568-55e6-4ecb-a3ee-252a73e8887a" width="48%" />
+  <img alt="Token 管理器 - 历史记录" src="https://github.com/user-attachments/assets/c7ae4d56-70a0-40e8-8b15-f93637fa6a0c" width="48%" />
+</p>
 
 
 ## 功能
@@ -22,8 +31,9 @@
 ## 安装
 
 1. 安装浏览器扩展 **Tampermonkey（油猴）**。
-2. 点击`user.js`
-3. 打开任意网页，右下角会出现 `Token管理` 按钮。
+2. 点击上面的“一键安装（推荐）”链接，Tampermonkey 会自动弹出安装页面。
+3. 如果没有自动弹出：打开 Tampermonkey 控制面板 -> `实用工具(Utilities)` -> `导入(Import)`，粘贴脚本内容或导入本地文件。
+4. 打开任意网页，右下角会出现 `Token管理` 按钮。
 
 ## 重要：启用 Cookie 访问权限（必须）
 
