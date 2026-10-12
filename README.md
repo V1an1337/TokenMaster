@@ -1,6 +1,6 @@
 # TokenMaster (Tampermonkey Token 管理器)
 
-一个油猴脚本，用于在当前网页查看/编辑并保存 Token 相关数据（`localStorage` + `Cookie`），支持历史记录，以及导入/导出备份。
+一个油猴脚本，用于在当前网页查看/编辑并保存 Token 相关数据（`localStorage` + `sessionStorage` + `Cookie`，Cookie 支持按域扫描子域名并保留完整属性），支持历史记录，以及导入/导出备份。
 
 ## 一键安装（推荐）
 
@@ -16,8 +16,9 @@
 
 ## 功能
 
-- **当前编辑**：列出当前站点的 `localStorage` 与 `Cookie`，可直接编辑，点击“保存更改并刷新”应用。
-- **保存记录**：把当前数据快照保存到历史记录（按 `hostname` 区分网站）。
+- **当前编辑**：列出当前站点的 `localStorage`、`sessionStorage` 与 `Cookie`（Cookie 会按域扫描当前域名及其子域名，并显示 `domain / path / HttpOnly / Secure` 等属性），可直接编辑，点击“保存更改并刷新”应用。
+- **保存记录**：把当前数据快照保存到历史记录（按 `hostname` 区分网站），Cookie 会连同 `domain / path / expires / HttpOnly / Secure / SameSite` 属性一起保存。
+- **还原记录**：加载记录时按保存的属性写回 Cookie（含 `HttpOnly` 与其它子域名的 Cookie，例如认证服务的 `auth.*` / `clerk.*`），并还原 `localStorage / sessionStorage`。
 - **历史记录**：
   - 重命名记录
   - 一键加载并刷新
@@ -37,7 +38,10 @@
 
 ## 重要：启用 Cookie 访问权限（必须）
 
-否则 `GM_cookie` 可能无法读取/写入 Cookie（尤其是一些受限制的 Cookie），导入/导出与“当前编辑”的 Cookie 部分会不完整。
+否则 `GM_cookie` 无法读取/写入 Cookie，会导致：
+
+- 读不到 `HttpOnly` Cookie（如 Clerk 的 `__client`、`__session`）；
+- 写不回带 `domain / path / HttpOnly / expires` 属性的 Cookie（跨子域登录态会还原失败）。
 
 请在油猴里设置：
 
@@ -58,3 +62,4 @@
 
 - 数据保存在 Tampermonkey 存储中（Key：`token_manager_records`）。
 - 导出的 JSON 里通常包含敏感信息（登录态、Token、Cookie）。请勿发给不可信的人或上传到公开位置。
+- 记录中可能包含其它子域名的 Cookie（例如 `auth.*` / `clerk.*`）及 `HttpOnly` 属性信息，属于账号级凭证，请妥善保管。

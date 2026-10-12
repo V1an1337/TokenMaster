@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Token 管理器（支持导出）
 // @namespace    http://tampermonkey.net/
-// @version      1.7
-// @description  简洁界面：当前 Token 编辑与历史记录分为两个 Tab，支持记录名称、名称筛选、历史名称编辑，所有关键文本为黑色
+// @version      1.8
+// @description  按域扫描 Cookie（含子域与完整属性），支持 localStorage / sessionStorage / Cookie 的保存与属性级回放（domain/path/expires/httpOnly）
 // @author       github.com/V1an1337
 // @match        *://*/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_cookie
+// @grant        GM.cookie
 // @license      MIT
 // ==/UserScript==
 
@@ -56,6 +57,19 @@
         }[ch]));
     }
 
+    // 强制输入框/文本域使用黑字白底，避免被站点深色主题 CSS 覆盖导致“有值却看不见”
+    function applyReadableFieldStyles(el) {
+        if (!el || !el.style) return;
+        try {
+            el.style.setProperty('color', '#000', 'important');
+            el.style.setProperty('background-color', '#ffffff', 'important');
+            el.style.setProperty('-webkit-text-fill-color', '#000', 'important');
+            el.style.setProperty('color-scheme', 'light', 'important');
+            el.style.setProperty('opacity', '1', 'important');
+            el.style.setProperty('visibility', 'visible', 'important');
+        } catch (e) {}
+    }
+
     function getCookieMap() {
         const map = {};
         if (!document.cookie) return map;
@@ -80,38 +94,187 @@
         return map;
     }
 
-    async function getCookieMapByGM() {
-        const map = {};
-        if (typeof GM_cookie === 'undefined' || typeof GM_cookie.list !== 'function') return map;
+    // ===== Cookie API（兼容 GM_cookie 与 GM.cookie 两种 Tampermonkey API，回调 / Promise 双形式）=====
 
-        const cookies = await new Promise(resolve => {
-            let done = false;
-            const finish = value => {
-                if (done) return;
-                done = true;
-                resolve(Array.isArray(value) ? value : []);
+    const cookieApi = (typeof GM !== 'undefined' && GM && GM.cookie) ? GM.cookie
+        : ((typeof GM_cookie !== 'undefined') ? GM_cookie : null);
+
+    function hasCookieApi() {
+        return !!(cookieApi && typeof cookieApi.list === 'function');
+    }
+
+    // list -> cookie 数组；set / delete -> 是否成功
+    function callCookieApi(method, details) {
+        return new Promise(resolve => {
+            const fn = (cookieApi && typeof cookieApi[method] === 'function') ? cookieApi[method] : null;
+            if (!fn) {
+                resolve(method === 'list' ? [] : false);
+                return;
+            }
+
+            let settled = false;
+            const finish = (...args) => {
+                if (settled) return;
+                settled = true;
+
+                if (method === 'list') {
+                    const cookies = args[0];
+                    resolve(Array.isArray(cookies) ? cookies : []);
+                    return;
+                }
+
+                // set / delete 的回调可能是 (error) 或 (cookie, error)，统一取最后一个参数判断
+                const error = args.length > 1 ? args[1] : args[0];
+                resolve(!error);
             };
 
             try {
-                const maybe = GM_cookie.list({ url: location.href }, finish);
+                const maybe = fn.call(cookieApi, details, function () { finish.apply(null, arguments); });
                 if (maybe && typeof maybe.then === 'function') {
-                    maybe.then(finish).catch(() => finish([]));
+                    maybe.then(value => finish(value), reason => finish(reason || 'cookie-api-error'));
                 }
             } catch (e) {
-                finish([]);
+                finish(method === 'list' ? [] : 'cookie-api-error');
             }
         });
-
-        cookies.forEach(cookie => {
-            if (!cookie || typeof cookie.name !== 'string') return;
-            map[cookie.name] = cookie.value ?? '';
-        });
-
-        return map;
     }
 
-    function buildCookieString(key, value, expires) {
-        const parts = [`${key}=${encodeURIComponent(value ?? '')}`, 'path=/'];
+    function listCookies(details) { return callCookieApi('list', details); }
+    function setCookieViaApi(details) { return callCookieApi('set', details); }
+    function deleteCookieViaApi(details) { return callCookieApi('delete', details); }
+
+    function normalizeCookieDomain(value) {
+        if (typeof value !== 'string') return '';
+        let domain = value.trim().toLowerCase();
+        if (!domain) return '';
+        domain = domain.replace(/^[a-z][a-z0-9+.-]*:\/\//, '');
+        domain = domain.split('/')[0];
+        return domain;
+    }
+
+    function normalizeSameSite(value) {
+        const v = String(value || '').toLowerCase();
+        if (v === 'no_restriction' || v === 'none') return 'no_restriction';
+        if (v === 'lax') return 'lax';
+        if (v === 'strict') return 'strict';
+        return '';
+    }
+
+    // 常见多段公共后缀 / 共享托管后缀：按域扫描到此为止，避免抓到无关站点的 Cookie
+    const COOKIE_SCAN_STOP_SUFFIXES = new Set([
+        'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'me.uk', 'net.uk', 'sch.uk', 'ltd.uk', 'plc.uk',
+        'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn', 'ac.cn',
+        'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au', 'id.au',
+        'co.jp', 'ne.jp', 'or.jp', 'ac.jp', 'go.jp',
+        'co.kr', 'or.kr', 'ne.kr', 'pe.kr',
+        'com.tw', 'org.tw', 'net.tw', 'idv.tw', 'com.hk', 'org.hk', 'edu.hk',
+        'com.sg', 'org.sg', 'edu.sg', 'com.my', 'org.my', 'com.ph', 'com.vn',
+        'com.id', 'co.id', 'or.id', 'web.id',
+        'co.nz', 'net.nz', 'org.nz', 'co.in', 'net.in', 'org.in', 'firm.in',
+        'com.mx', 'com.ar', 'com.co', 'com.pe', 'com.tr', 'com.ru', 'com.ua',
+        'co.za', 'co.il', 'com.sa', 'com.eg', 'com.pk', 'com.bd',
+        'github.io', 'gitlab.io', 'githubusercontent.com',
+        'vercel.app', 'now.sh', 'netlify.app', 'netlify.com', 'pages.dev', 'workers.dev',
+        'deno.dev', 'fly.dev', 'herokuapp.com', 'onrender.com', 'railway.app',
+        'up.railway.app', 'koyeb.app', 'cyclic.app', 'glitch.me', 'repl.co', 'replit.app', 'replit.dev',
+        'web.app', 'firebaseapp.com', 'appspot.com', 'run.app', 'azurewebsites.net',
+        'cloudfront.net', 's3.amazonaws.com', 'blogspot.com', 'wordpress.com', 'tumblr.com',
+        'wixsite.com', 'squarespace.com', 'myshopify.com', 'neocities.org', 'readthedocs.io',
+        'localhost'
+    ]);
+
+    // 按域扫描列表：从完整 hostname 逐级向上，直到公共后缀/共享后缀为止。
+    // 例：suno.com -> [suno.com]；www.suno.com -> [www.suno.com, suno.com]
+    // 这样可以覆盖 Clerk 之类的兄弟子域（auth.suno.com / clerk.suno.com）
+    function getCookieScanDomains(hostname) {
+        const host = String(hostname || '').toLowerCase().replace(/\.+$/, '');
+        if (!host) return [];
+        if (/^[\d.]+$/.test(host) || host.includes(':')) return [host];
+
+        const parts = host.split('.');
+        if (parts.length <= 1) return [host];
+
+        const domains = [];
+        for (let i = 0; i <= parts.length - 2; i++) {
+            const suffix = parts.slice(i).join('.');
+            if (COOKIE_SCAN_STOP_SUFFIXES.has(suffix)) break;
+            domains.push(suffix);
+        }
+
+        return domains.length ? domains : [host];
+    }
+
+    function buildCookieUrl(item) {
+        const domain = (normalizeCookieDomain(item && item.domain) || normalizeCookieDomain(currentHostname)).replace(/^\./, '');
+        const rawPath = (item && typeof item.path === 'string' && item.path) ? item.path : '/';
+        const path = rawPath.charAt(0) === '/' ? rawPath : `/${rawPath}`;
+        const scheme = (item && (item.secure === true || item.httpOnly === true))
+            ? 'https'
+            : (location.protocol === 'https:' ? 'https' : 'http');
+        return `${scheme}://${domain || 'localhost'}${path}`;
+    }
+
+    function buildCookieItemFromApi(cookie) {
+        if (!cookie || typeof cookie.name !== 'string' || !cookie.name) return null;
+
+        const item = { type: 'Cookie', key: cookie.name, value: cookie.value ?? '' };
+        const domain = normalizeCookieDomain(cookie.domain);
+        if (domain) item.domain = domain;
+        if (typeof cookie.path === 'string' && cookie.path) item.path = cookie.path;
+        if (typeof cookie.secure === 'boolean') item.secure = cookie.secure;
+        if (typeof cookie.httpOnly === 'boolean') item.httpOnly = cookie.httpOnly;
+        if (cookie.sameSite) {
+            const sameSite = normalizeSameSite(cookie.sameSite);
+            if (sameSite) item.sameSite = sameSite;
+        }
+        if (typeof cookie.hostOnly === 'boolean') item.hostOnly = cookie.hostOnly;
+
+        let expirationDate = cookie.expirationDate;
+        if (typeof expirationDate === 'number' && isFinite(expirationDate)) {
+            if (expirationDate > 1e12) expirationDate = Math.floor(expirationDate / 1000);
+            item.expirationDate = expirationDate;
+        } else if (cookie.session === true) {
+            item.session = true;
+        }
+
+        return item;
+    }
+
+    async function collectCookieItemsForCurrentSite() {
+        const items = [];
+        const seen = new Set();
+
+        const push = cookie => {
+            const item = buildCookieItemFromApi(cookie);
+            if (!item) return;
+            const dedupeKey = `${item.key}\u0000${item.domain || ''}\u0000${item.path || '/'}`;
+            if (seen.has(dedupeKey)) return;
+            seen.add(dedupeKey);
+            items.push(item);
+        };
+
+        if (hasCookieApi()) {
+            const scans = [listCookies({ url: location.href })];
+            getCookieScanDomains(currentHostname).forEach(domain => {
+                scans.push(listCookies({ domain }));
+            });
+
+            const results = await Promise.all(scans);
+            results.forEach(list => list.forEach(push));
+        }
+
+        // 兜底：GM_cookie 不可用时，至少保存当前页面 document.cookie 可见的键值
+        const docMap = getCookieMap();
+        Object.keys(docMap).forEach(name => {
+            if (items.some(item => item.key === name)) return;
+            items.push({ type: 'Cookie', key: name, value: docMap[name] });
+        });
+
+        return items;
+    }
+
+    function buildCookieString(key, value, expires, path) {
+        const parts = [`${key}=${encodeURIComponent(value ?? '')}`, `path=${path || '/'}`];
         if (expires) parts.push(`expires=${expires}`);
 
         if (key.startsWith('__Secure-') || key.startsWith('__Host-')) {
@@ -119,6 +282,74 @@
         }
 
         return parts.join('; ');
+    }
+
+    function storageForType(type) {
+        const t = String(type || '').toLowerCase();
+        if (t === 'localstorage') return localStorage;
+        if (t === 'sessionstorage') return sessionStorage;
+        return null;
+    }
+
+    // 按记录的属性回放单条 Cookie（domain / path / expires / httpOnly / secure / sameSite）
+    async function applyCookieItem(item, options) {
+        const opts = options || {};
+        const name = String(item && item.key || '');
+        if (!name) return false;
+
+        const value = (typeof opts.value === 'string') ? opts.value : (item.value ?? '');
+        const domain = normalizeCookieDomain(item.domain);
+        const path = (typeof item.path === 'string' && item.path) ? item.path : '/';
+        const shouldRemove = opts.remove === true || value === '';
+
+        if (hasCookieApi() && typeof cookieApi.set === 'function') {
+            const url = buildCookieUrl(item);
+
+            if (shouldRemove) {
+                const removed = await deleteCookieViaApi({ url, name });
+                if (removed) return true;
+                return setCookieViaApi({
+                    url,
+                    name,
+                    value: '',
+                    path,
+                    expirationDate: Math.floor(Date.now() / 1000) - 60
+                });
+            }
+
+            const details = { url, name, value, path };
+            if (domain && item.hostOnly !== true) details.domain = domain;
+            if (item.secure === true) details.secure = true;
+            if (item.httpOnly === true) details.httpOnly = true;
+            const sameSite = normalizeSameSite(item.sameSite);
+            if (sameSite) details.sameSite = sameSite;
+            if (typeof item.expirationDate === 'number' && isFinite(item.expirationDate)) {
+                details.expirationDate = Math.floor(item.expirationDate);
+            }
+
+            let ok = await setCookieViaApi(details);
+            if (!ok && details.sameSite) {
+                // 部分 Tampermonkey 版本设置 SameSite=None 会失败，去掉后重试
+                delete details.sameSite;
+                ok = await setCookieViaApi(details);
+            }
+            return ok;
+        }
+
+        // 无 Cookie API：退化为 document.cookie（仅当前主机、非 HttpOnly）
+        const cookieHost = domain.replace(/^\./, '');
+        const hostMatches = !cookieHost
+            || cookieHost === currentHostname
+            || (!!currentHostname && currentHostname.endsWith(`.${cookieHost}`));
+        if (!hostMatches) return false;
+
+        if (shouldRemove) {
+            document.cookie = buildCookieString(name, '', 'Thu, 01 Jan 1970 00:00:00 GMT', path);
+            return true;
+        }
+
+        document.cookie = buildCookieString(name, value, null, path);
+        return true;
     }
 
     function ensureRecordIdsForHost(host) {
@@ -170,7 +401,7 @@
     async function saveCurrentRecord() {
         const items = await getTokenItems();
         if (items.length === 0) {
-            alert('当前页面未找到含 "token" 的字段，无法保存。');
+            alert('当前页面未找到可保存的数据（localStorage / sessionStorage / Cookie），无法保存。');
             return;
         }
 
@@ -192,21 +423,34 @@
         if (activeTab === 'history') renderHistoryTab();
     }
 
-    function applyRecordAndReload(recordData) {
+    async function applyRecordAndReload(recordData) {
         if (!Array.isArray(recordData)) {
             alert('记录数据异常，无法加载。');
             return;
         }
 
+        const pendingCookies = [];
+
         recordData.forEach(item => {
             if (!item || typeof item.key !== 'string') return;
-            if (item.type === 'localStorage') {
-                localStorage.setItem(item.key, item.value ?? '');
-            } else {
-                document.cookie = buildCookieString(item.key, item.value ?? '');
+
+            const itemType = String(item.type || '').toLowerCase();
+
+            if (itemType === 'localstorage' || itemType === 'sessionstorage') {
+                const storage = storageForType(item.type);
+                if (!storage) return;
+                try {
+                    storage.setItem(item.key, item.value ?? '');
+                } catch (e) {}
+                return;
+            }
+
+            if (itemType === 'cookie') {
+                pendingCookies.push(applyCookieItem(item));
             }
         });
 
+        await Promise.all(pendingCookies);
         location.reload();
     }
 
@@ -736,7 +980,7 @@
         return w;
     }
 
-    // 获取当前 token 字段
+    // 获取当前页面可保存的全部数据：localStorage + sessionStorage + Cookie（含子域与属性）
     async function getTokenItems() {
         const items = [];
 
@@ -744,79 +988,75 @@
         try {
             for (let i = 0; i < localStorage.length; i++) {
                 const key = localStorage.key(i);
-                if (key && key.toLowerCase()) {
-                    items.push({
-                        type: 'localStorage',
-                        key,
-                        value: localStorage.getItem(key) || ''
-                    });
-                }
+                if (!key) continue;
+                items.push({
+                    type: 'localStorage',
+                    key,
+                    value: localStorage.getItem(key) ?? ''
+                });
             }
         } catch (e) {}
 
-        // Cookies
-        const cookieMap = getCookieMap();
-        const gmCookieMap = await getCookieMapByGM();
-        Object.keys(gmCookieMap).forEach(key => {
-            if (typeof cookieMap[key] === 'undefined') {
-                cookieMap[key] = gmCookieMap[key];
-            }
-        });
-        Object.keys(cookieMap).forEach(key => {
-            if (key) {
+        // sessionStorage
+        try {
+            for (let i = 0; i < sessionStorage.length; i++) {
+                const key = sessionStorage.key(i);
+                if (!key) continue;
                 items.push({
-                    type: 'Cookie',
+                    type: 'sessionStorage',
                     key,
-                    value: cookieMap[key]
+                    value: sessionStorage.getItem(key) ?? ''
                 });
             }
-        });
+        } catch (e) {}
 
-        return items;
+        // Cookies（按域扫描当前域名及其子域，保留 domain / path / expires / httpOnly 等属性）
+        const cookieItems = await collectCookieItemsForCurrentSite();
+        return items.concat(cookieItems);
     }
 
     // 批量应用编辑并刷新
-    function applyAllAndReload() {
+    async function applyAllAndReload() {
         const blocks = currentContent.querySelectorAll('.token-block');
-        const cookieMap = getCookieMap();
+        const pendingCookies = [];
         let hasChange = false;
 
         blocks.forEach(block => {
-            const type = block.dataset.type;
-            const key = block.dataset.key;
+            const item = currentItems[Number(block.dataset.uid)];
             const textarea = block.querySelector('textarea');
-            if (!key || !textarea) return;
+            if (!item || !textarea) return;
 
             const newValue = textarea.value;
+            const itemType = String(item.type || '').toLowerCase();
 
-            if (type === 'localStorage') {
+            if (itemType === 'localstorage' || itemType === 'sessionstorage') {
+                const storage = storageForType(item.type);
+                if (!storage) return;
                 try {
-                    const oldValue = localStorage.getItem(key) || '';
+                    const oldValue = storage.getItem(item.key) ?? '';
                     if (newValue === '' && oldValue !== '') {
-                        localStorage.removeItem(key);
+                        storage.removeItem(item.key);
                         hasChange = true;
                     } else if (newValue !== oldValue) {
-                        localStorage.setItem(key, newValue);
+                        storage.setItem(item.key, newValue);
                         hasChange = true;
                     }
                 } catch (e) {}
-            } else {
-                const hasOld = Object.prototype.hasOwnProperty.call(cookieMap, key);
-                const oldValue = hasOld ? cookieMap[key] : '';
+                return;
+            }
 
+            if (itemType === 'cookie') {
+                if (newValue === (item.value ?? '')) return;
+                hasChange = true;
                 if (newValue === '') {
-                    if (hasOld) {
-                        document.cookie = buildCookieString(key, '', 'Thu, 01 Jan 1970 00:00:00 GMT');
-                        hasChange = true;
-                        delete cookieMap[key];
-                    }
-                } else if (!hasOld || oldValue !== newValue) {
-                    document.cookie = buildCookieString(key, newValue);
-                    hasChange = true;
-                    cookieMap[key] = newValue;
+                    pendingCookies.push(applyCookieItem(item, { remove: true }));
+                } else {
+                    pendingCookies.push(applyCookieItem(item, { value: newValue }));
                 }
             }
         });
+
+        await Promise.all(pendingCookies);
 
         if (hasChange) {
             location.reload();
@@ -981,10 +1221,14 @@
     const currentList = document.createElement('div');
     currentContent.appendChild(currentList);
 
+    // 渲染当前编辑 Tab 时的数据快照（供“保存更改并刷新”按键按 uid 定位）
+    let currentItems = [];
+
     // 渲染当前编辑 Tab
     async function renderCurrentTab() {
         currentList.innerHTML = '';
         const items = await getTokenItems();
+        currentItems = items;
         // Prefer items whose key contains "token" (case-insensitive).
         items.sort((a, b) => {
             const aKey = (a && typeof a.key === 'string') ? a.key : '';
@@ -997,11 +1241,16 @@
             const bType = (b && typeof b.type === 'string') ? b.type : '';
             if (aType !== bType) return aType.localeCompare(bType);
 
-            return aKey.toLowerCase().localeCompare(bKey.toLowerCase());
+            const byKey = aKey.toLowerCase().localeCompare(bKey.toLowerCase());
+            if (byKey !== 0) return byKey;
+
+            const aDomain = (a && typeof a.domain === 'string') ? a.domain : '';
+            const bDomain = (b && typeof b.domain === 'string') ? b.domain : '';
+            return aDomain.localeCompare(bDomain);
         });
 
         if (items.length === 0) {
-            currentList.innerHTML = '<p style="color:#888;text-align:center;padding:30px;">未找到含 "token" 的字段</p>';
+            currentList.innerHTML = '<p style="color:#888;text-align:center;padding:30px;">未找到可保存的数据（localStorage / sessionStorage / Cookie）</p>';
             applyBtn.disabled = true;
             applyBtn.style.opacity = '0.6';
             return;
@@ -1010,11 +1259,12 @@
         applyBtn.disabled = false;
         applyBtn.style.opacity = '1';
 
-        items.forEach(item => {
+        items.forEach((item, index) => {
             const block = document.createElement('div');
             block.className = 'token-block';
             block.dataset.type = item.type;
             block.dataset.key = item.key;
+            block.dataset.uid = String(index);
             block.style.marginBottom = '16px';
             block.style.padding = '12px';
             block.style.background = '#f9f9f9';
@@ -1025,7 +1275,19 @@
             info.style.marginBottom = '8px';
             info.style.fontSize = '13px';
             info.style.color = '#000';
-            info.innerHTML = `<strong>类型：</strong><span style="color:#000;">${escapeHtml(item.type)}</span>　<strong>键名：</strong><span style="color:#000;font-weight:bold;">${escapeHtml(item.key)}</span>`;
+
+            let infoHTML = `<strong>类型：</strong><span style="color:#000;">${escapeHtml(item.type)}</span>　<strong>键名：</strong><span style="color:#000;font-weight:bold;">${escapeHtml(item.key)}</span>`;
+            if (String(item.type).toLowerCase() === 'cookie') {
+                const attrBits = [];
+                if (item.domain) attrBits.push(`域：${item.domain}`);
+                if (item.path && item.path !== '/') attrBits.push(`路径：${item.path}`);
+                if (item.httpOnly) attrBits.push('HttpOnly');
+                if (item.secure) attrBits.push('Secure');
+                if (attrBits.length) {
+                    infoHTML += `<div style="font-size:12px;color:#333;margin-top:4px;">${escapeHtml(attrBits.join('　'))}</div>`;
+                }
+            }
+            info.innerHTML = infoHTML;
             block.appendChild(info);
 
             const textarea = document.createElement('textarea');
@@ -1038,6 +1300,7 @@
             textarea.style.fontFamily = 'monospace';
             textarea.style.fontSize = '12px';
             textarea.style.resize = 'vertical';
+            applyReadableFieldStyles(textarea);
             block.appendChild(textarea);
 
             currentList.appendChild(block);
@@ -1104,6 +1367,7 @@
     filterInput.style.border = '1px solid #ccc';
     filterInput.style.borderRadius = '4px';
     filterInput.style.fontSize = '13px';
+    applyReadableFieldStyles(filterInput);
     historyHeader.appendChild(filterInput);
 
     const historyTools = document.createElement('div');
@@ -1207,6 +1471,7 @@
             nameInput.style.border = '1px solid #ccc';
             nameInput.style.borderRadius = '4px';
             nameInput.style.fontSize = '13px';
+            applyReadableFieldStyles(nameInput);
 
             const saveNameBtn = document.createElement('button');
             saveNameBtn.textContent = '保存';
